@@ -1,0 +1,45 @@
+# ---- Build artifacts ------------------------------------------------------
+build/
+cmake-build-*/
+out/
+dist/
+build-*/
+
+# CMake
+CMakeUserPresets.json
+*.ninja
+CMakeSettings.json
+
+# Compiled objects / binaries
+*.o
+*.obj
+*.a
+*.lib
+*.exp
+*.pdb
+*.so
+*.so.*
+*.dylib
+*.dll
+
+# ---- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Editors / OS ---------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

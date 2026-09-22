@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+# Only one concurrent run per branch (cancel superseded runs).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_BUILD_TYPE: Release
+
+jobs:
+  # ------------------------------------------------------------------
+  #  CPU / OpenMP build + tests, one job per platform.
+  # ------------------------------------------------------------------
+  cpu-windows:
+    name: CPU build + tests (Windows / MSVC)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install Python deps
+        run: python -m pip install --upgrade pip numpy pytest
+
+      - name: Configure (MSVC, x64)
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Run tests (C smoke test + Python suite)
+        shell: pwsh
+        run: |
+          $env:DECIMATE_LIB_DIR = (Resolve-Path build/Release).Path
+          ctest --test-dir build -C Release --output-on-failure
+
+  cpu-linux:
+    name: CPU build + tests (Linux / GCC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install toolchain + Python deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake python3-numpy
+          python -m pip install --upgrade pip pytest
+
+      - name: Configure (GCC)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run tests (C smoke test + Python suite)
+        run: |
+          export DECIMATE_LIB_DIR="$(cd build && pwd)"
+          ctest --test-dir build --output-on-failure
+
+  cpu-macos:
+    name: CPU build + tests (macOS / Apple clang)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install Python deps
+        run: python -m pip install --upgrade pip numpy pytest
+
+      - name: Configure (Apple clang)
+        # Note: Apple clang has no OpenMP runtime, so the build falls back to
+        # the serial CPU path (see CMakeLists). This job still validates the
+        # full compile + link + test cycle on Darwin.
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run tests (C smoke test + Python suite)
+        run: |
+          export DECIMATE_LIB_DIR="$(cd build && pwd)"
+          ctest --test-dir build --output-on-failure
+
+  # ------------------------------------------------------------------
+  #  CUDA: compile + link the GPU mirror and run the CPU smoke test.
+  #  GitHub-hosted runners have no GPU, so this validates that the CUDA
+  #  source compiles, links against cudart, and the CPU fallback still
+  #  works (decimate_cuda_available() returns 0 without a device).
+  #  Add a GPU runner (e.g. self-hosted / Azure / Lambda) to exercise the
+  #  actual GPU path.
+  # ------------------------------------------------------------------
+  cuda-compile:
+    name: CUDA compile + link (Linux / nvcc)
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      options: --security-opt seccomp=unconfined
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends cmake build-essential
+
+      - name: Configure (CUDA ON)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+                -DDECIMATE_ENABLE_CUDA=ON \
+                -DCMAKE_CUDA_ARCHITECTURES="80"
+
+      - name: Build (compile + link GPU mirror)
+        run: cmake --build build --parallel
+
+      # This container has no numpy/pytest, so run only the native C smoke
+      # test (the python_tests entry is not applicable here).
+      - name: C smoke test (CPU fallback, no GPU present)
+        run: ctest --test-dir build -R smoke_test --output-on-failure
+
+      - name: Show nvcc / CUDA version
+        run: nvcc --version

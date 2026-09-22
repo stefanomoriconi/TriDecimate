@@ -1,0 +1,25 @@
+# Normalize line endings for text files in the repository.
+* text=auto
+
+# Force LF for source code (C, C++, Python, CMake, Markdown, CI).
+*.c text eol=lf
+*.h text eol=lf
+*.cu text eol=lf
+*.py text eol=lf
+*.cmake text eol=lf
+CMakeLists.txt text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.sh text eol=lf
+
+# Mark generated / binary files so Git never touches them.
+*.dll binary
+*.so binary
+*.dylib binary
+*.lib binary
+*.exe binary
+*.png binary
+*.jpg binary
+*.ico binary
