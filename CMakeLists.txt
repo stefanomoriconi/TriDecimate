@@ -34,7 +34,11 @@ if(DECIMATE_ENABLE_CUDA)
         set(CMAKE_CUDA_STANDARD 14)
         set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     endif()
-    set(CMAKE_CUDA_ARCHITECTURES "60;70;75;80;86;90")
+    # NB: nvcc 12.8+ dropped sm_60/70 (Pascal/Volta) support; kept 75+ for
+    # broad Turing-through-Blackwell coverage, including GB10 (sm_121).
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90;100;120")
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -71,6 +75,7 @@ else()
     if(OpenMP_C_FOUND)
         target_link_libraries(decimate PUBLIC OpenMP::OpenMP_C)
     endif()
+    find_package(CUDAToolkit REQUIRED)
     target_link_libraries(decimate PRIVATE CUDA::cudart)
     message(STATUS "decimate: CUDA enabled (GPU mirror + CPU fallback)")
 endif()

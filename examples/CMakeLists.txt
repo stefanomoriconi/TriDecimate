@@ -7,6 +7,12 @@
 add_executable(example_c example_c.c)
 target_link_libraries(example_c PRIVATE decimate::decimate)
 
+# example_c.c calls libm functions (acos, sincosf) directly; on Linux these
+# are not pulled in transitively via decimate::decimate, so link explicitly.
+if(UNIX AND NOT APPLE)
+    target_link_libraries(example_c PRIVATE m)
+endif()
+
 # Register as a test-free ctest entry that merely runs the example and prints
 # timing; it doubles as a smoke test of the public ABI end-to-end.
 add_test(NAME example_c COMMAND example_c)
