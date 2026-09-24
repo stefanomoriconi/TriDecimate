@@ -39,10 +39,24 @@ static const char* cu_err(cudaError_t e) { return cudaGetErrorString(e); }
     do {                                                                      \
         cudaError_t _e = (call);                                              \
         if (_e != cudaSuccess) {                                              \
-            (void)cu_err(_e);                                                 \
+            fprintf(stderr, "CUDA_CHECK failed at %s:%d: %s\n", __FILE__, __LINE__, cu_err(_e)); \
             return DECIMATE_ERR_INTERNAL;                                     \
-        }                                                                     \
+        }                                                                      \
     } while (0)
+
+/* Deinterleave one component (offset 0/1/2) of an AoS float3 host array
+ * `aos` into a contiguous device array of `n` elements, and the inverse.
+ * A flat cudaMemcpy of `n` floats starting at aos+offset is WRONG here: it
+ * reads/writes contiguous floats rather than every 3rd float, silently
+ * scrambling x/y/z components instead of separating them. */
+#define CUDA_CHECK_H2D_DEINTERLEAVE(dst, aos, offset, n)                      \
+    CUDA_CHECK(cudaMemcpy2D((dst), sizeof(float), (aos) + (offset),           \
+                            3 * sizeof(float), sizeof(float), (n),           \
+                            cudaMemcpyHostToDevice))
+#define CUDA_CHECK_D2H_INTERLEAVE(aos, offset, src, n)                        \
+    CUDA_CHECK(cudaMemcpy2D((aos) + (offset), 3 * sizeof(float), (src),       \
+                            sizeof(float), sizeof(float), (n),               \
+                            cudaMemcpyDeviceToHost))
 
 /* ------------------------------------------------------------------ */
 /*  Device data layout (struct-of-arrays)                              */
@@ -95,7 +109,7 @@ __device__ int device_vfaces_contains(const int* vf_head, const int* vf_next,
                                       const int* vf_len, int v, int t)
 {
     for (int p = vf_head[v]; p != -1; p = vf_next[p])
-        if (p == t) return 1;
+        if (p / 3 == t) return 1;
     return 0;
 }
 
@@ -110,7 +124,7 @@ __device__ float device_edge_cost(const float* vx, const float* vy, const float*
     if (mode == DECIMATE_MODE_PRESERVE_BOUNDARIES) {
         int shared = 0, p;
         for (p = vf_head[a]; p != -1; p = vf_next[p])
-            if (device_vfaces_contains(vf_head, vf_next, NULL, b, p)) ++shared;
+            if (device_vfaces_contains(vf_head, vf_next, NULL, b, p / 3)) ++shared;
         return shared == 1 ? base * bpen : base;
     }
 
@@ -118,9 +132,9 @@ __device__ float device_edge_cost(const float* vx, const float* vy, const float*
         /* gather surrounding = (faces(a) U faces(b)) \ shared(a,b) */
         int list[64], n = 0, p;
         for (p = vf_head[a]; p != -1; p = vf_next[p])
-            if (!device_vfaces_contains(vf_head, vf_next, NULL, b, p)) list[n++] = p;
+            if (!device_vfaces_contains(vf_head, vf_next, NULL, b, p / 3)) list[n++] = p / 3;
         for (p = vf_head[b]; p != -1; p = vf_next[p])
-            if (!device_vfaces_contains(vf_head, vf_next, NULL, a, p)) list[n++] = p;
+            if (!device_vfaces_contains(vf_head, vf_next, NULL, a, p / 3)) list[n++] = p / 3;
 
         if (n > 1) {
             float mindot = 1.0f;
@@ -175,7 +189,7 @@ static int cuda_available(void)
     return (e == cudaSuccess && dev_count > 0) ? 1 : 0;
 }
 
-int decimate_cuda_available(void)
+extern "C" int decimate_cuda_available(void)
 {
     if (g_cuda_ok < 0) g_cuda_ok = cuda_available();
     return g_cuda_ok;
@@ -240,17 +254,29 @@ static int gpop(GEdge** hp, size_t* size, GEdge* out)
     return 1;
 }
 
-/* Device adjacency (linked-list) helpers, host side. */
-static void dvf_add(GPUState* d, int v, int t, int* head, int* next, int* len)
+/* Device adjacency (linked-list) helpers, host side.
+ *
+ * A triangle has 3 vertex "corners" and must simultaneously belong to 3
+ * different per-vertex adjacency lists. A single next[] cell per face
+ * cannot serve as the link node for all 3 lists at once, so we index by
+ * "slot" = 3*face + corner (3 permanent slots per face) instead of by
+ * bare face id; next[] must be sized NT*3 accordingly. */
+static void dvf_add(GPUState* d, int v, int t, const int* fv, int* head, int* next, int* len)
 {
-    next[t] = head[v];
-    head[v] = t;
+    int c = -1;
+    if (fv[3 * t + 0] == v) c = 0;
+    else if (fv[3 * t + 1] == v) c = 1;
+    else if (fv[3 * t + 2] == v) c = 2;
+    if (c < 0) return; /* should not happen: v must be one of t's corners */
+    int slot = 3 * t + c;
+    next[slot] = head[v];
+    head[v] = slot;
     len[v]++;
 }
 
 static int dvf_contains(const int* head, const int* next, int v, int t)
 {
-    for (int p = head[v]; p != -1; p = next[p]) if (p == t) return 1;
+    for (int p = head[v]; p != -1; p = next[p]) if (p / 3 == t) return 1;
     return 0;
 }
 
@@ -258,7 +284,7 @@ static void dvf_remove(int* head, int* next, int v, int t)
 {
     int* p = &head[v];
     while (*p != -1) {
-        if (*p == t) { *p = next[*p]; break; }
+        if (*p / 3 == t) { *p = next[*p]; break; }
         p = &next[*p];
     }
 }
@@ -267,7 +293,7 @@ static void dvf_remove(int* head, int* next, int v, int t)
 /*  GPU entry point                                                    */
 /* ------------------------------------------------------------------ */
 
-decimate_status decimate_mesh_gpu(const float* vertices, const int32_t* triangles,
+extern "C" decimate_status decimate_mesh_gpu(const float* vertices, const int32_t* triangles,
                                   int32_t n_vert, int32_t n_tri,
                                   const decimate_options* opts,
                                   decimate_result* out_result)
@@ -302,7 +328,7 @@ decimate_status decimate_mesh_gpu(const float* vertices, const int32_t* triangle
     int   *falive = (int*)malloc(NT * sizeof(int));
     float *hnrm = (float*)malloc(NT * 3 * sizeof(float));
     int   *head = (int*)malloc(NV * sizeof(int));
-    int   *next = (int*)malloc(NT * sizeof(int));
+    int   *next = (int*)malloc(NT * 3 * sizeof(int)); /* 3 slots/face: see dvf_add */
     int   *len = (int*)malloc(NV * sizeof(int));
     GEdge *heap = NULL;
     size_t hsize = 0, hcap = 0;
@@ -328,14 +354,13 @@ decimate_status decimate_mesh_gpu(const float* vertices, const int32_t* triangle
         fv[3 * i + 1] = triangles[3 * i + 1];
         fv[3 * i + 2] = triangles[3 * i + 2];
         falive[i] = 1;
-        next[i] = -1;
     }
+    for (i = 0; i < n_tri * 3; ++i) next[i] = -1;
     for (i = 0; i < n_tri; ++i) {
         int v[3] = { fv[3 * i + 0], fv[3 * i + 1], fv[3 * i + 2] };
         int m;
-        for (m = 0; m < 3; ++m) dvf_add(&s, v[m], i, head, next, len);
+        for (m = 0; m < 3; ++m) dvf_add(&s, v[m], i, fv, head, next, len);
     }
-
     /* ---- Collect unique edges ------------------------------------- */
     {
         int ecap = n_tri * 3 > 0 ? n_tri * 3 : 8;
@@ -361,7 +386,6 @@ decimate_status decimate_mesh_gpu(const float* vertices, const int32_t* triangle
                 elo[n_edge] = lo; ehi[n_edge] = hi; ++n_edge;
             }
         }
-
         /* ---- Use the GPU for the expensive parallel passes -------- */
         float *dvx, *dvy, *dvz, *dnrm, *dcost;
         int   *dfv, *dhead, *dnext, *dlo, *dhi;
@@ -371,18 +395,18 @@ decimate_status decimate_mesh_gpu(const float* vertices, const int32_t* triangle
         CUDA_CHECK(cudaMalloc(&dvz, NV * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&dfv, NT * 3 * sizeof(int)));
         CUDA_CHECK(cudaMalloc(&dhead, NV * sizeof(int)));
-        CUDA_CHECK(cudaMalloc(&dnext, NT * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&dnext, NT * 3 * sizeof(int)));
         CUDA_CHECK(cudaMalloc(&dnrm, NT * 3 * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&dlo, (size_t)(n_edge ? n_edge : 1) * sizeof(int)));
         CUDA_CHECK(cudaMalloc(&dhi, (size_t)(n_edge ? n_edge : 1) * sizeof(int)));
         CUDA_CHECK(cudaMalloc(&dcost, (size_t)(n_edge ? n_edge : 1) * sizeof(float)));
 
-        CUDA_CHECK(cudaMemcpy(dvx, hx + 0, NV * sizeof(float), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(dvy, hx + 1, NV * sizeof(float), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(dvz, hx + 2, NV * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK_H2D_DEINTERLEAVE(dvx, hx, 0, NV);
+        CUDA_CHECK_H2D_DEINTERLEAVE(dvy, hx, 1, NV);
+        CUDA_CHECK_H2D_DEINTERLEAVE(dvz, hx, 2, NV);
         CUDA_CHECK(cudaMemcpy(dfv, fv, NT * 3 * sizeof(int), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(dhead, head, NV * sizeof(int), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(dnext, next, NT * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(dnext, next, NT * 3 * sizeof(int), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(dlo, elo, (size_t)(n_edge ? n_edge : 1) * sizeof(int), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(dhi, ehi, (size_t)(n_edge ? n_edge : 1) * sizeof(int), cudaMemcpyHostToDevice));
 
@@ -438,54 +462,58 @@ decimate_status decimate_mesh_gpu(const float* vertices, const int32_t* triangle
             if (!to_del) return DECIMATE_ERR_MEMORY;
             int p;
             for (p = head[v0]; p != -1; p = next[p])
-                if (dvf_contains(head, next, v1, p)) to_del[td++] = p;
+                if (dvf_contains(head, next, v1, p / 3)) to_del[td++] = p / 3;
 
             /* iterate over the union of both adjacency lists */
             for (p = head[v0]; p != -1; p = next[p]) {
+                int t = p / 3;
                 int in_del = 0;
-                for (i = 0; i < td; ++i) if (to_del[i] == p) { in_del = 1; break; }
+                for (i = 0; i < td; ++i) if (to_del[i] == t) { in_del = 1; break; }
                 if (in_del) continue;
-                if (fv[3 * p + 0] == v1) fv[3 * p + 0] = v0;
-                if (fv[3 * p + 1] == v1) fv[3 * p + 1] = v0;
-                if (fv[3 * p + 2] == v1) fv[3 * p + 2] = v0;
-                if (fv[3 * p + 0] == fv[3 * p + 1] || fv[3 * p + 1] == fv[3 * p + 2] || fv[3 * p + 2] == fv[3 * p + 0])
-                    to_del[td++] = p;
+                if (fv[3 * t + 0] == v1) fv[3 * t + 0] = v0;
+                if (fv[3 * t + 1] == v1) fv[3 * t + 1] = v0;
+                if (fv[3 * t + 2] == v1) fv[3 * t + 2] = v0;
+                if (fv[3 * t + 0] == fv[3 * t + 1] || fv[3 * t + 1] == fv[3 * t + 2] || fv[3 * t + 2] == fv[3 * t + 0])
+                    to_del[td++] = t;
                 else {
-                    if (!dvf_contains(head, next, v0, p)) dvf_add(&s, v0, p, head, next, len);
+                    if (!dvf_contains(head, next, v0, t)) dvf_add(&s, v0, t, fv, head, next, len);
                     {
-                        int a = fv[3 * p + 0], b = fv[3 * p + 1], d = fv[3 * p + 2];
+                        int a = fv[3 * t + 0], b = fv[3 * t + 1], d = fv[3 * t + 2];
                         float v0x = hx[3 * b + 0] - hx[3 * a + 0], v0y = hx[3 * b + 1] - hx[3 * a + 1], v0z = hx[3 * b + 2] - hx[3 * a + 2];
                         float v1x = hx[3 * d + 0] - hx[3 * a + 0], v1y = hx[3 * d + 1] - hx[3 * a + 1], v1z = hx[3 * d + 2] - hx[3 * a + 2];
                         float nx = v0y * v1z - v0z * v1y, ny = v0z * v1x - v0x * v1z, nz = v0x * v1y - v0y * v1x;
                         float nn = sqrtf(nx * nx + ny * ny + nz * nz);
                         if (nn > DECIMATE_EPS) { nx /= nn; ny /= nn; nz /= nn; }
                         else { nx = ny = nz = 0; }
-                        hnrm[3 * p + 0] = nx; hnrm[3 * p + 1] = ny; hnrm[3 * p + 2] = nz;
+                        hnrm[3 * t + 0] = nx; hnrm[3 * t + 1] = ny; hnrm[3 * t + 2] = nz;
                     }
                 }
             }
-            for (p = head[v1]; p != -1; p = next[p]) {
+            for (p = head[v1]; p != -1; ) {
+                int t = p / 3;
+                int p_next = next[p]; /* snapshot BEFORE dvf_add may reuse this slot */
                 int in_del = 0;
-                for (i = 0; i < td; ++i) if (to_del[i] == p) { in_del = 1; break; }
-                if (in_del) continue;
-                if (fv[3 * p + 0] == v1) fv[3 * p + 0] = v0;
-                if (fv[3 * p + 1] == v1) fv[3 * p + 1] = v0;
-                if (fv[3 * p + 2] == v1) fv[3 * p + 2] = v0;
-                if (fv[3 * p + 0] == fv[3 * p + 1] || fv[3 * p + 1] == fv[3 * p + 2] || fv[3 * p + 2] == fv[3 * p + 0])
-                    to_del[td++] = p;
+                for (i = 0; i < td; ++i) if (to_del[i] == t) { in_del = 1; break; }
+                if (in_del) { p = p_next; continue; }
+                if (fv[3 * t + 0] == v1) fv[3 * t + 0] = v0;
+                if (fv[3 * t + 1] == v1) fv[3 * t + 1] = v0;
+                if (fv[3 * t + 2] == v1) fv[3 * t + 2] = v0;
+                if (fv[3 * t + 0] == fv[3 * t + 1] || fv[3 * t + 1] == fv[3 * t + 2] || fv[3 * t + 2] == fv[3 * t + 0])
+                    to_del[td++] = t;
                 else {
-                    if (!dvf_contains(head, next, v0, p)) dvf_add(&s, v0, p, head, next, len);
+                    if (!dvf_contains(head, next, v0, t)) dvf_add(&s, v0, t, fv, head, next, len);
                     {
-                        int a = fv[3 * p + 0], b = fv[3 * p + 1], d = fv[3 * p + 2];
+                        int a = fv[3 * t + 0], b = fv[3 * t + 1], d = fv[3 * t + 2];
                         float v0x = hx[3 * b + 0] - hx[3 * a + 0], v0y = hx[3 * b + 1] - hx[3 * a + 1], v0z = hx[3 * b + 2] - hx[3 * a + 2];
                         float v1x = hx[3 * d + 0] - hx[3 * a + 0], v1y = hx[3 * d + 1] - hx[3 * a + 1], v1z = hx[3 * d + 2] - hx[3 * a + 2];
                         float nx = v0y * v1z - v0z * v1y, ny = v0z * v1x - v0x * v1z, nz = v0x * v1y - v0y * v1x;
                         float nn = sqrtf(nx * nx + ny * ny + nz * nz);
                         if (nn > DECIMATE_EPS) { nx /= nn; ny /= nn; nz /= nn; }
                         else { nx = ny = nz = 0; }
-                        hnrm[3 * p + 0] = nx; hnrm[3 * p + 1] = ny; hnrm[3 * p + 2] = nz;
+                        hnrm[3 * t + 0] = nx; hnrm[3 * t + 1] = ny; hnrm[3 * t + 2] = nz;
                     }
                 }
+                p = p_next;
             }
 
             /* commit deletions */
@@ -511,9 +539,10 @@ decimate_status decimate_mesh_gpu(const float* vertices, const int32_t* triangle
                 int *neigh = (int*)malloc((size_t)ncap2 * sizeof(int));
                 if (!neigh) return DECIMATE_ERR_MEMORY;
                 for (p = head[v0]; p != -1; p = next[p]) {
+                    int t = p / 3;
                     int m;
                     for (m = 0; m < 3; ++m) {
-                        int nv = fv[3 * p + m];
+                        int nv = fv[3 * t + m];
                         if (nv == v0) continue;
                         dup = 0;
                         for (q = 0; q < nn; ++q) if (neigh[q] == nv) { dup = 1; break; }
@@ -532,12 +561,12 @@ decimate_status decimate_mesh_gpu(const float* vertices, const int32_t* triangle
                         nlo[i] = a; nhi[i] = b;
                     }
                     /* refresh device state (positions, faces, normals, adjacency) */
-                    CUDA_CHECK(cudaMemcpy(dvx, hx + 0, NV * sizeof(float), cudaMemcpyHostToDevice));
-                    CUDA_CHECK(cudaMemcpy(dvy, hx + 1, NV * sizeof(float), cudaMemcpyHostToDevice));
-                    CUDA_CHECK(cudaMemcpy(dvz, hx + 2, NV * sizeof(float), cudaMemcpyHostToDevice));
+                    CUDA_CHECK_H2D_DEINTERLEAVE(dvx, hx, 0, NV);
+                    CUDA_CHECK_H2D_DEINTERLEAVE(dvy, hx, 1, NV);
+                    CUDA_CHECK_H2D_DEINTERLEAVE(dvz, hx, 2, NV);
                     CUDA_CHECK(cudaMemcpy(dfv, fv, NT * 3 * sizeof(int), cudaMemcpyHostToDevice));
                     CUDA_CHECK(cudaMemcpy(dhead, head, NV * sizeof(int), cudaMemcpyHostToDevice));
-                    CUDA_CHECK(cudaMemcpy(dnext, next, NT * sizeof(int), cudaMemcpyHostToDevice));
+                    CUDA_CHECK(cudaMemcpy(dnext, next, NT * 3 * sizeof(int), cudaMemcpyHostToDevice));
                     CUDA_CHECK(cudaMemcpy(dnrm, hnrm, NT * 3 * sizeof(float), cudaMemcpyHostToDevice));
                     CUDA_CHECK(cudaMemcpy(dlo, nlo, (size_t)nn * sizeof(int), cudaMemcpyHostToDevice));
                     CUDA_CHECK(cudaMemcpy(dhi, nhi, (size_t)nn * sizeof(int), cudaMemcpyHostToDevice));
@@ -630,10 +659,10 @@ __global__ void kernel_lloyd(const float* px, const float* py, const float* pz,
                              const int*   vflen, /* [n_vert]  face count */
                              const int*   is_boundary,
                              float* npx, float* npy, float* npz,
-                             float step, int pin, float smooth)
+                             float step, int pin, float smooth, int n_vert)
 {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < 0) return; /* bounds enforced by host launch; guard for safety */
+    if (i < 0 || i >= n_vert) return; /* grid is padded to a multiple of blockDim.x */
 
     if (vflen[i] == 0 || (pin && is_boundary[i])) {
         npx[i] = px[i]; npy[i] = py[i]; npz[i] = pz[i];
@@ -650,7 +679,8 @@ __global__ void kernel_lloyd(const float* px, const float* py, const float* pz,
         if (!dd && nc < 96) cand[nc++] = (w); } } while (0)
 
     for (int p = head[i]; p != -1; p = next[p]) {
-        const int a = fv[3 * p + 0], b = fv[3 * p + 1], d = fv[3 * p + 2];
+        const int t = p / 3;
+        const int a = fv[3 * t + 0], b = fv[3 * t + 1], d = fv[3 * t + 2];
         const float ax = px[a], ay = py[a], az = pz[a];
         const float bx = px[b], by = py[b], bz = pz[b];
         const float dx = px[d], dy = py[d], dz = pz[d];
@@ -696,7 +726,15 @@ __global__ void kernel_lloyd(const float* px, const float* py, const float* pz,
     npz[i] = pzv + step * ldz;
 }
 
-decimate_status decimate_regularise_gpu(const float* vertices, const int32_t* triangles,
+/* Comparator for packed 64-bit edge keys, used by decimate_regularise_gpu's
+ * boundary-mask computation below (hoisted to file scope: nested functions
+ * are a GNU C extension not valid in C++/CUDA translation units). */
+static int cmp_ll(const void* a, const void* b) {
+    long long x = *(const long long*)a, y = *(const long long*)b;
+    return (x > y) - (x < y);
+}
+
+extern "C" decimate_status decimate_regularise_gpu(const float* vertices, const int32_t* triangles,
                                         int32_t n_vert, int32_t n_tri,
                                         const decimate_regularise_options* opts,
                                         decimate_result* out_result)
@@ -726,7 +764,7 @@ decimate_status decimate_regularise_gpu(const float* vertices, const int32_t* tr
     float *hx = (float*)malloc(NV * 3 * sizeof(float));
     int   *fv = (int*)malloc(NT * 3 * sizeof(int));
     int   *head = (int*)malloc(NV * sizeof(int));
-    int   *next = (int*)malloc(NT * sizeof(int));
+    int   *next = (int*)malloc(NT * 3 * sizeof(int)); /* 3 slots/face, see dvf_add */
     int   *vflen = (int*)malloc(NV * sizeof(int));
     int   *isb = (int*)malloc(NV * sizeof(int));
     if (!hx || !fv || !head || !next || !vflen || !isb) {
@@ -744,12 +782,15 @@ decimate_status decimate_regularise_gpu(const float* vertices, const int32_t* tr
         fv[3 * i + 0] = triangles[3 * i + 0];
         fv[3 * i + 1] = triangles[3 * i + 1];
         fv[3 * i + 2] = triangles[3 * i + 2];
-        next[i] = -1;
     }
+    for (i = 0; i < n_tri * 3; ++i) next[i] = -1;
     for (i = 0; i < n_tri; ++i) {
         int v[3] = { fv[3 * i + 0], fv[3 * i + 1], fv[3 * i + 2] };
         int m;
-        for (m = 0; m < 3; ++m) { next[i] = head[v[m]]; head[v[m]] = i; vflen[v[m]]++; }
+        for (m = 0; m < 3; ++m) {
+            int slot = 3 * i + m;
+            next[slot] = head[v[m]]; head[v[m]] = slot; vflen[v[m]]++;
+        }
     }
 
     /* Boundary mask: vertices owning an edge that appears in exactly one face.
@@ -774,10 +815,6 @@ decimate_status decimate_regularise_gpu(const float* vertices, const int32_t* tr
         }
         /* Sort the packed keys, then single forward scan for runs of length 1. */
         {
-            static int cmp_ll(const void* a, const void* b) {
-                long long x = *(const long long*)a, y = *(const long long*)b;
-                return (x > y) - (x < y);
-            }
             qsort(ekeys, (size_t)e, sizeof(long long), cmp_ll);
             int s = 0;
             while (s < e) {
@@ -808,16 +845,16 @@ decimate_status decimate_regularise_gpu(const float* vertices, const int32_t* tr
     CUDA_CHECK(cudaMalloc(&dp1z, NV * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&dfv, NT * 3 * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&dhead, NV * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&dnext, NT * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&dnext, NT * 3 * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&dvflen, NV * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&dism, NV * sizeof(int)));
 
-    CUDA_CHECK(cudaMemcpy(dp0x, hx + 0, NV * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dp0y, hx + 1, NV * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dp0z, hx + 2, NV * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK_H2D_DEINTERLEAVE(dp0x, hx, 0, NV);
+    CUDA_CHECK_H2D_DEINTERLEAVE(dp0y, hx, 1, NV);
+    CUDA_CHECK_H2D_DEINTERLEAVE(dp0z, hx, 2, NV);
     CUDA_CHECK(cudaMemcpy(dfv, fv, NT * 3 * sizeof(int), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(dhead, head, NV * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dnext, next, NT * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dnext, next, NT * 3 * sizeof(int), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(dvflen, vflen, NV * sizeof(int), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(dism, isb, NV * sizeof(int), cudaMemcpyHostToDevice));
 
@@ -833,7 +870,7 @@ decimate_status decimate_regularise_gpu(const float* vertices, const int32_t* tr
         float* nz = (i % 2 == 0) ? dp1z : dp0z;
 
         kernel_lloyd<<<blocks, 256, 0, 0>>>(cx, cy, cz, dfv, dhead, dnext, dvflen, dism,
-                                             nx, ny, nz, step, pin, smooth);
+                                             nx, ny, nz, step, pin, smooth, n_vert);
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
@@ -853,9 +890,9 @@ decimate_status decimate_regularise_gpu(const float* vertices, const int32_t* tr
         return DECIMATE_ERR_MEMORY;
     }
 
-    CUDA_CHECK(cudaMemcpy(ov + 0, fx, NV * sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(ov + 1, fy, NV * sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(ov + 2, fz, NV * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK_D2H_INTERLEAVE(ov, 0, fx, NV);
+    CUDA_CHECK_D2H_INTERLEAVE(ov, 1, fy, NV);
+    CUDA_CHECK_D2H_INTERLEAVE(ov, 2, fz, NV);
 
     for (i = 0; i < n_tri; ++i) {
         ot[3 * i + 0] = triangles[3 * i + 0];
