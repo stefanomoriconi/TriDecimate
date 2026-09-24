@@ -68,7 +68,7 @@ static int build_uv_sphere(float** verts, int32_t** tris, int stacks, int slices
 
     *verts = v;
     *tris = t;
-    return nt;
+    return k / 3; /* k counts int32 writes (3 per tri); pole rows emit 1 tri/lon, not 2 */
 }
 
 /* Compute per-triangle shape quality SQ = 4*sqrt(3)*Area / (e1^2+e2^2+e3^2)
