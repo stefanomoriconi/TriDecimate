@@ -1,7 +1,12 @@
-# decimate
+# TriDecimate
 
-<!-- Replace OWNER/decimate with your real GitHub org/user when publishing. -->
-[![CI](https://github.com/OWNER/decimate/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/decimate/actions/workflows/ci.yml)
+[![CI](https://github.com/stefanomoriconi/TriDecimate/actions/workflows/ci.yml/badge.svg)](https://github.com/stefanomoriconi/TriDecimate/actions/workflows/ci.yml)
+[![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](LICENSE)
+
+> ⚠️ **Work in progress.** This is a research-grade reference implementation
+> that has been build- and correctness-verified (CPU + real CUDA GPU hardware,
+> AddressSanitizer, `compute-sanitizer`), but has **not** had independent
+> third-party review or production hardening. See [Disclaimer & TODO](#disclaimer--work-in-progress) before relying on it.
 
 High-performance, **deterministic** triangle-mesh decimation with a stable C ABI,
 an OpenMP-parallelized CPU backend, an optional CUDA GPU backend, and a thin
@@ -14,9 +19,15 @@ merge, same tie-break) but replaces the prototype's `O(N^2 log N)` per-iteration
 full re-sort with a lazy-deletion binary min-heap, so it scales to large meshes
 and runs several times faster on multi-core CPUs.
 
-> **Status:** production-ready reference implementation. CPU/OpenMP is the
-> primary, always-available backend. CUDA is opt-in and mirrors the CPU result
-> bit-for-bit on ties.
+![Decimation + shape regularisation on a UV sphere](docs/images/decimate_before_after.png)
+
+*Figure generated directly from the test suite's mesh builder — see
+`docs/generate_figures.py`.*
+
+> **Status:** CPU/OpenMP is the primary, always-available backend and is
+> considered solid. CUDA is opt-in; it has now been verified end-to-end on
+> real GPU hardware (see [Verification status](#verification-status)) but is
+> newer and less battle-tested than the CPU path.
 
 ---
 
@@ -367,32 +378,53 @@ What has been exercised on each platform:
 | Windows (MSVC, x64) | ✅ | ✅ | ✅ | — |
 | Linux (GCC) | ✅ via CI | ✅ via CI | ✅ via CI | compile+link via CI |
 | macOS (Apple clang) | ✅ via CI | ✅ via CI | ✅ via CI | — |
-| CUDA GPU | — (no local nvcc) | — | — | **compiled + linked in CI only** |
+| Linux + NVIDIA GPU (GB10, sm_121, CUDA 13) | ✅ local | ✅ local | ✅ local | **✅ full runtime execution, verified** |
 
 > **CUDA note:** the GPU backend in `src/decimate_cuda.cu` mirrors the CPU
 > logic (same SoA layout, same cost modes, same deterministic `edge_key`
 > tie-break, and the same per-vertex Lloyd / CVT update in the
-> shape-regularisation pass) and **compiles and
-> links** in the `cuda-compile` CI job. It has not yet been run end-to-end on real
-> GPU hardware from this machine (no local `nvcc`/device), so the
-> bit-for-bit CPU↔GPU equivalence is asserted by construction and by the
-> CI compile+link check, not by a runtime GPU test. Add a GPU runner to
-> exercise the actual CUDA execution path.
-
-### Publishing to GitHub
-
-This tree is self-contained and ready to push. Before your first push:
-
-1. Replace the `OWNER/decimate` placeholder in the badge/links at the top of
-   `README.md` with your real org/user.
-2. Optional: rename the Python package in `pyproject.toml` (`decimate`) to
-   match the `decimate_tri_mesh` library if you prefer a namespaced name.
-3. `git init`, `git add -A`, `git commit`, then push to your remote — the
-   `cpu-windows` / `cpu-linux` / `cpu-macos` / `cuda-compile` jobs in
-   `.github/workflows/ci.yml` will run automatically on the first push.
+> shape-regularisation pass). It has now been run end-to-end on real GPU
+> hardware (NVIDIA GB10, compute capability 12.1) and verified with the full
+> `ctest` suite, an ASan-instrumented build (0 host-side errors), and
+> `compute-sanitizer --tool memcheck` (0 device errors). Several real
+> correctness bugs were found and fixed this way (AoS/SoA deinterleave,
+> an adjacency-list aliasing bug, a traversal-during-mutation bug, and a
+> missing kernel bounds check) — see the git history for details. The
+> `cuda-compile` CI job still only compiles+links (no GPU runner in CI); the
+> runtime verification above was performed locally.
 
 ---
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+**CC BY-NC 4.0** — free for research, personal, and non-commercial use;
+commercial use requires a separate license from the author. See
+[`LICENSE`](LICENSE).
+
+---
+
+## Disclaimer & Work-In-Progress
+
+This project is a **research-grade reference implementation**, not a
+production-hardened library. It has been correctness-tested by its author
+(unit/integration tests, ASan, `compute-sanitizer` on real GPU hardware) but
+has **not** undergone independent third-party review, fuzzing, or large-scale
+production use. Use at your own risk; please open an issue if you find a bug.
+
+### To-do / known limitations
+
+- [ ] No fuzz-testing of malformed/adversarial mesh input (non-manifold,
+      duplicate vertices, NaN coordinates, etc.) — behavior on such input is
+      currently best-effort (`DECIMATE_ERR_INPUT` on some cases only).
+- [ ] CUDA path is verified on a single GPU architecture (NVIDIA GB10, sm_121)
+      locally; not yet cross-checked on older architectures (Turing/Ampere/Ada)
+      with a real device (CI only compiles/links, doesn't execute).
+- [ ] No large-mesh (>1M triangle) stress test yet for the CUDA path.
+- [ ] Benchmark numbers in this README are single-run, single-machine
+      figures, not averaged over multiple runs/machines.
+- [ ] No packaged releases (PyPI wheel, versioned GitHub Releases) yet —
+      build from source only.
+- [ ] Windows/macOS CUDA build is untested (CI only covers Linux for CUDA).
+
+Contributions and bug reports that help close these gaps are very welcome.
+

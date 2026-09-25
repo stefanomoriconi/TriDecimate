@@ -5,19 +5,19 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "decimate"
 version = "1.3.0"
-description = "High-performance, deterministic triangle-mesh decimation (greedy edge-collapse) with a stable C ABI, OpenMP CPU backend and optional CUDA GPU backend, wrapped for Python via ctypes."
+description = "TriDecimate: high-performance, deterministic triangle-mesh decimation (greedy edge-collapse) with a stable C ABI, OpenMP CPU backend and optional CUDA GPU backend, wrapped for Python via ctypes."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = { text = "CC-BY-NC-4.0" }
 authors = [
-    { name = "decimate maintainers" },
+    { name = "Stefano Moriconi" },
 ]
-keywords = ["mesh", "decimation", "geometry", "openmp", "cuda", "ctypes"]
+keywords = ["mesh", "decimation", "simplification", "geometry", "openmp", "cuda", "ctypes", "tridecimate"]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
+    "License :: Free for non-commercial use",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
@@ -35,9 +35,9 @@ test = ["pytest>=6.0"]
 
 [project.urls]
 # Replace with your real repository URL when publishing.
-Homepage = "https://github.com/OWNER/decimate"
-Source = "https://github.com/OWNER/decimate"
-Issues = "https://github.com/OWNER/decimate/issues"
+Homepage = "https://github.com/stefanomoriconi/TriDecimate"
+Source = "https://github.com/stefanomoriconi/TriDecimate"
+Issues = "https://github.com/stefanomoriconi/TriDecimate/issues"
 
 # ---------------------------------------------------------------------------
 #  Packaging: the pure-Python wrapper is importable straight from the
