@@ -44,3 +44,4 @@ htmlcov/
 *.swp
 .DS_Store
 Thumbs.db
+!docs/sample_meshes/*.obj
