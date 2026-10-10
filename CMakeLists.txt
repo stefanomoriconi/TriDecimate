@@ -86,7 +86,7 @@ if(WIN32)
     # enabled by DECIMATE_EXPORTS (see DECIMATE_API macro).
     target_compile_definitions(decimate PRIVATE DECIMATE_EXPORTS)
 elseif(APPLE)
-    target_link_options(decimate PRIVATE "-install_name @rpath/libdecimate_tri_mesh.dylib")
+    target_link_options(decimate PRIVATE "SHELL:-install_name @rpath/libdecimate_tri_mesh.dylib")
 endif()
 
 target_compile_options(decimate PRIVATE
