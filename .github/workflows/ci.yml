@@ -33,15 +33,6 @@ jobs:
       - name: Install Python deps
         run: python -m pip install --upgrade pip numpy pytest
 
-      - name: Disable Windows Error Reporting UI
-        # Prevents a crashed/asserting native console test from popping a
-        # blocking "program stopped working" dialog that hangs CI forever
-        # (no one is present to dismiss it on a hosted runner).
-        shell: pwsh
-        run: |
-          New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Force | Out-Null
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Name DontShowUI -Value 1 -Type DWord
-
       - name: Configure (MSVC, x64)
         # Let CMake auto-detect the installed VS generator/toolset rather than
         # hardcoding a version string, which can drift out of sync with the
@@ -55,12 +46,8 @@ jobs:
         shell: pwsh
         run: |
           $env:DECIMATE_LIB_DIR = (Resolve-Path build/Release).Path
-          # Force a small, fixed OpenMP thread count: MSVC's OpenMP runtime
-          # (vcomp) has been observed to hang during thread/topology
-          # auto-detection on some virtualized GitHub-hosted Windows
-          # runners. --timeout is a safety net regardless of root cause, so
-          # CI fails fast instead of hanging for hours.
-          $env:OMP_NUM_THREADS = "2"
+          # --timeout is a safety net so a genuine hang fails fast with a
+          # clear diagnostic instead of stalling CI for hours.
           ctest --test-dir build -C Release --output-on-failure --timeout 120
 
   cpu-linux:

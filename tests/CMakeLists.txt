@@ -12,6 +12,16 @@ target_link_libraries(decimate_smoke_test PRIVATE decimate::decimate)
 
 add_test(NAME smoke_test COMMAND decimate_smoke_test)
 
+# On Windows, the DLL lives in a different output directory
+# ($<TARGET_FILE_DIR:decimate>) than the test executable, so the loader
+# cannot find it via the default search path. Without this, the process
+# hits a native "dependent DLL not found" hard-error dialog that hangs
+# forever on a headless CI runner (no one to dismiss it).
+if(WIN32)
+    set_tests_properties(smoke_test PROPERTIES
+        ENVIRONMENT "PATH=$<TARGET_FILE_DIR:decimate>;$ENV{PATH}")
+endif()
+
 # ---- Optional Python integration tests -------------------------------------
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/python/decimate.py")
