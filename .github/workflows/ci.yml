@@ -46,7 +46,13 @@ jobs:
         shell: pwsh
         run: |
           $env:DECIMATE_LIB_DIR = (Resolve-Path build/Release).Path
-          ctest --test-dir build -C Release --output-on-failure
+          # Force a small, fixed OpenMP thread count: MSVC's OpenMP runtime
+          # (vcomp) has been observed to hang during thread/topology
+          # auto-detection on some virtualized GitHub-hosted Windows
+          # runners. --timeout is a safety net regardless of root cause, so
+          # CI fails fast instead of hanging for hours.
+          $env:OMP_NUM_THREADS = "2"
+          ctest --test-dir build -C Release --output-on-failure --timeout 120
 
   cpu-linux:
     name: CPU build + tests (Linux / GCC)
